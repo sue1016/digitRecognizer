@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 import torch
 from torchvision import datasets, transforms
-from .cnn import DigitCNN
+from cnn import *
 from PIL import Image
 # third-party library
 from torchvision import datasets, transforms
@@ -12,14 +12,11 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.utils.data as Data
 import torchvision
-
+from .learningLoadDataset import DigitDataset
 class DigitRecognizer():
     def __init__(self):
-        self.data_tf_test = transforms.Compose(
-            [transforms.ToTensor(),
-             transforms.Normalize([0.5], [-0.25])])
         self.cnn = DigitCNN()
-        self.cnn.load_state_dict(torch.load("digit_model.pkl"))
+        self.cnn.load_state_dict(torch.load("digit_module/digit_model_false.pkl"))
         self.shrink_size = {"height_up": 10, "height_down": 10, "width_up": 10, "width_down": 10}
 
     def recognize_cells(self, cellPaths):
@@ -41,11 +38,11 @@ class DigitRecognizer():
         the_most_possible_digits = []
         confidences = []
         # 1.cell_image_to_normalized_digit_images
-        normalized_digit_images = self.cell_image_to_normalized_digit_images(cellPath)
-        for normalized_digit_image in normalized_digit_images:
+        normalized_digit_image_paths = self.cell_image_to_normalized_digit_images(cellPath)
+        for normalized_digit_image_path in normalized_digit_image_paths:
             # 2.normalized_digit_image_to_preprocessed_digit_image
-            preprocessed_digit_image = self.normalized_digit_image_to_preprocessed_digit_image(normalized_digit_image)
-            # 3.use cnn model to  predict preprocessed digit image
+            preprocessed_digit_image = self.normalized_digit_image_to_preprocessed_digit_image(normalized_digit_image_path)
+            # 3.use cnn model to  predict preprocessed train image
             the_most_possible_digit, confidence_of_the_most_possible_digit = self.cnn_predict_preprocessed_digit_image(
                 preprocessed_digit_image)
             the_most_possible_digits.append(int(the_most_possible_digit))
@@ -53,11 +50,12 @@ class DigitRecognizer():
 
         cell_result, cell_confidence = self.predicted_digit_images_results_to_final_cell_result(
             the_most_possible_digits, confidences)
+        print(cell_result, cell_confidence)
         return cell_result, cell_confidence
 
-    def cell_image_to_normalized_digit_images(self, cell_image_file):
+    def cell_image_to_normalized_digit_images(self, cell_image_path):
         # 切出单个数字并补成正方形，返回得到的图像（ndarray)的list
-        cell_image = cv2.imread(cell_image_file)
+        cell_image = cv2.imread(cell_image_path)
         grayed_cell_image = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
         height, width = len(grayed_cell_image), len(grayed_cell_image[0])
         grayed_cell_image = grayed_cell_image[self.shrink_size["height_down"]:height - self.shrink_size["height_up"],
@@ -65,36 +63,63 @@ class DigitRecognizer():
         ret, thresh = cv2.threshold(grayed_cell_image, 127, 255, cv2.THRESH_BINARY)
         contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         raw_digit_images_rec_cordinates = self.get_digits_rectangles(contours, hierarchy)
-        normalized_digit_images = []
-        for raw_digit_image_rec_cordinate in raw_digit_images_rec_cordinates:
+        normalized_digit_image_paths = []
+        for digit_count,raw_digit_image_rec_cordinate in enumerate(raw_digit_images_rec_cordinates):
+
             x, y, w, h = raw_digit_image_rec_cordinate
             raw_digit_image = grayed_cell_image[y:y + h, x:x + w]
             if h > w:
                 length = h
             else:
                 length = w
-            normalized_digit_image = np.zeros((length, length))
+            border=int(length*0.2)
+            normalized_digit_image = np.zeros((length+border, length+border))
             # normailized:to be squared and centered
-            for i in range(length):
-                for j in range(length):
+            for i in range(length+border):
+                for j in range(length+border):
                     normalized_digit_image[i, j] = 255
             for i in range(h):
                 for j in range(w):
-                    normalized_digit_image[int((length - h) / 2) + i, int((length - w) / 2) + j] = raw_digit_image[i, j]
-            normalized_digit_images.append(normalized_digit_image)
-        return normalized_digit_images
+                    normalized_digit_image[int(border*0.5)+int((length - h) / 2) + i, int(border*0.5)+int((length - w) / 2) + j] = raw_digit_image[i, j]
+                    digit_image_path = str(cell_image_path)[:-4] + str(digit_count) + ".png"
+                    cv2.imwrite(digit_image_path, normalized_digit_image)
+            normalized_digit_image_paths.append(digit_image_path)
 
-    def normalized_digit_image_to_preprocessed_digit_image(self, normalized_digit_image):
-        preprocessed_digit_image = Image.fromarray(normalized_digit_image)
+        return normalized_digit_image_paths
+
+    def normalized_digit_image_to_preprocessed_digit_image(self, normalized_digit_image_path):
+        normalized_digit_image = cv2.imread(normalized_digit_image_path)
+        normalized_digit_image = cv2.cvtColor(normalized_digit_image, cv2.COLOR_RGB2GRAY)
+        threshold = 127
+        height, width = len(normalized_digit_image), len(normalized_digit_image[0])
+        for m in range(height):
+            for n in range(width):
+                normalized_digit_image[m, n] = 255 - normalized_digit_image[m, n]
+                if (normalized_digit_image[m, n] < threshold):
+                    normalized_digit_image[m, n] = 0
+        cv2.imwrite(normalized_digit_image_path, normalized_digit_image)
+        preprocessed_digit_image = Image.open(normalized_digit_image_path)
         preprocessed_digit_image = preprocessed_digit_image.convert('L')
         preprocessed_digit_image = preprocessed_digit_image.resize((28, 28))
+        preprocessed_digit_image.save(normalized_digit_image_path)
+        preprocessed_digit_image = cv2.imread(normalized_digit_image_path)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        preprocessed_digit_image = cv2.dilate(preprocessed_digit_image, kernel)
+        preprocessed_digit_image = 1.4 * preprocessed_digit_image
+        preprocessed_digit_image[preprocessed_digit_image > 255] = 255
+        preprocessed_digit_image = np.around(preprocessed_digit_image)
+        preprocessed_digit_image = preprocessed_digit_image.astype(np.uint8)
+        cv2.imwrite(normalized_digit_image_path, preprocessed_digit_image)
+
+        preprocessed_digit_image = Image.open(normalized_digit_image_path)
+        preprocessed_digit_image = preprocessed_digit_image.convert("L")
+
         return preprocessed_digit_image
 
     def cnn_predict_preprocessed_digit_image(self, preprocessed_digit_image):
         # image to tensor
         to_tensor = transforms.Compose(
-            [transforms.ToTensor(),
-             transforms.Normalize([0.5], [-0.25])])
+            [transforms.ToTensor()])
         cnn_input_image_as_tensor = to_tensor(preprocessed_digit_image).float()
         cnn_input_image_as_tensor = cnn_input_image_as_tensor.unsqueeze_(0)
         # 预测分类label
@@ -150,8 +175,10 @@ class DigitRecognizer():
             train_data_loader = Data.DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True)
 
         elif mode == "USER_DEFINED":
-            pass
-
+            train_data =  DigitDataset(
+                root_dir_of_dataset='digit_module/data/',train=True,transform=torchvision.transforms.ToTensor())
+            train_data_loader = Data.DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True)
+        print(train_data_loader)
         return train_data_loader
     def get_test_data(self,mode="MINST"):
         if mode == "MINST":
@@ -160,14 +187,27 @@ class DigitRecognizer():
                      :10000] / 255.  # shape from (2000, 28, 28) to (2000, 1, 28, 28), value in range(0,1)
             test_y = test_data.test_labels[:10000]
         elif mode =="USER_DEFINED":
-            pass
-        return test_x,test_y
+            test_data = DigitDataset(root_dir_of_dataset='digit_module/data/',train=False,transform=torchvision.transforms.ToTensor())
+            test_data_loader = Data.DataLoader(dataset=test_data,batch_size=1, shuffle=True)
+            return test_data_loader
+        return test_x, test_y
+
+
     def test_cnn_model(self,mode="MINST"):
         cnn_model = self.cnn
-        test_x, test_y = self.get_test_data(mode)
-        test_output, last_layer = cnn_model(test_x)
-        pred_y = torch.max(test_output, 1)[1].data.squeeze()
-        accuracy = sum(pred_y == test_y) / float(test_y.size(0))
+        if mode == "MINST":
+            test_x, test_y = self.get_test_data(mode)
+            test_output, last_layer = cnn_model(test_x)
+            pred_y = torch.max(test_output, 1)[1].data.squeeze()
+            accuracy =int((pred_y == test_y).sum())/ (test_y.size(0))
+            print('| test accuracy: %.2f' % accuracy)
+        else:
+            test_data_loader = self.get_test_data(mode)
+            for step, (test_x, test_y) in enumerate(test_data_loader):
+                test_output, last_layer = cnn_model(test_x)
+                pred_y = torch.max(test_output, 1)[1].data.squeeze()
+                accuracy = int((pred_y == test_y).sum()) / (test_y.size(0))
+                print('| test accuracy: %.2f' % accuracy)
         return accuracy
 
     def train_cnn_model(self,mode):
@@ -178,6 +218,7 @@ class DigitRecognizer():
         loss_func = nn.CrossEntropyLoss()  # the target label is not one-hotted
         # training and testing
         for epoch in range(epoch):
+
             for step, (x, y) in enumerate(train_data_loader):  # gives batch data, normalize x when iterate train_loader
                 b_x = Variable(x)  # batch x
                 b_y = Variable(y)  # batch y
@@ -190,12 +231,25 @@ class DigitRecognizer():
 
                 # for testing the accuracy on the test set
                 if step % 50 == 0:
-                    accuracy = self.test_cnn_model(mode=mode)
-                    print('Epoch: ' + str(epoch) + '| train loss: %.4f' + str(loss) + '| test accuracy: %.2f' + str(
-                        accuracy))
+                    accuracy = self.test_cnn_model(mode="MINST")
+                    print('Epoch: ' + str(epoch) + '| train loss: %.4f' + str(loss) + '| test accuracy: %.2f' %accuracy)
         # 保存训练模型
-        torch.save(cnn_model.state_dict(), "digit_model_4_64.pkl")
+        torch.save(cnn_model.state_dict(), "digit_module/digit_model_false.pkl")
 
 
+    def get_digits_rectangles(self,contours, hierarchy):
+        # 确定cell中单个数字的矩形框
+        hierarchy = hierarchy[0]
+        bounding_rectangles = [cv2.boundingRect(ctr) for ctr in contours]
+        final_bounding_rectangles = []
+        # find the most common heirarchy level - that is where our digits's bounding boxes are
+        u, indices = np.unique(hierarchy[:, -1], return_inverse=True)
+        most_common_heirarchy = u[np.argmax(np.bincount(indices))]
+        for r, hr in zip(bounding_rectangles, hierarchy):
+            x, y, w, h = r
+            if ((w * h) > 200) and (10 <= w <= 400) and (10 <= h <= 400) and hr[3] == most_common_heirarchy:
+                # print(w * h)
+                final_bounding_rectangles.append(r)
+        return final_bounding_rectangles
 
 
